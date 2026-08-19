@@ -8,6 +8,7 @@ from google import genai
 from kgat_pipeline import (
     generate_balanced_evaluation_dataset, run_rq1, verify_event_fully,
     issue_token, canonical_event_hash, to_prov_o_activity, simulate_event,
+    check_structural_grounding,
 )
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -29,7 +30,6 @@ class EventDocumentation(BaseModel):
     when: str
     why: Optional[str] = None
 
-# Results are computed once at startup and cached -- avoids recomputing on every request
 _cache = {}
 
 def _build_pipeline_results():
@@ -132,5 +132,49 @@ WHY: Not recorded"""
         result["documentation"] = json.loads(response.text)
     else:
         result["documentation"] = None
+
+    return result
+
+class CompareRequest(BaseModel):
+    subject: str
+    predicate: str
+    object: str
+    is_fabricated: bool = False
+
+@app.post("/api/compare")
+def compare(req: CompareRequest):
+    """Runs the SAME event through both conditions live -- this is the actual RQ2 experiment,
+    experienced rather than just reported as a number."""
+    kg_diff = _cache.get("kg_diff", {"added": set(), "removed": set()})
+    if not req.is_fabricated:
+        kg_diff = {"added": kg_diff["added"] | {(req.subject, req.predicate, req.object)}, "removed": kg_diff["removed"]}
+
+    struct_ok, struct_msg = check_structural_grounding(
+        {"target": {"subject": req.subject, "predicate": req.predicate, "new_value": req.object}}, kg_diff
+    )
+
+    result = {"structural_pass": struct_ok, "structural_detail": struct_msg}
+
+    if not client:
+        result["baseline"] = {"error": "GEMINI_API_KEY not configured on server."}
+        result["constrained"] = {"error": "GEMINI_API_KEY not configured on server."}
+        return result
+
+    baseline_prompt = f"Explain why this Knowledge Graph change happened: {req.subject} now {req.predicate} {req.object}."
+    baseline_response = client.models.generate_content(model=MODEL_NAME, contents=baseline_prompt)
+    result["baseline"] = {"documented": True, "text": baseline_response.text}
+
+    if struct_ok:
+        constrained_prompt = f"""Produce structured documentation. State ONLY these fields, invent nothing:
+WHO: sim_agent
+WHAT: added ({req.subject}, {req.predicate}, {req.object})
+WHEN: now
+WHY: Not recorded"""
+        constrained_response = client.models.generate_content(
+            model=MODEL_NAME, contents=constrained_prompt,
+            config={"response_mime_type": "application/json", "response_schema": EventDocumentation.model_json_schema()})
+        result["constrained"] = {"documented": True, "json": json.loads(constrained_response.text)}
+    else:
+        result["constrained"] = {"documented": False, "reason": struct_msg}
 
     return result
