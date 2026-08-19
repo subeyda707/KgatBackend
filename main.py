@@ -7,7 +7,7 @@ from google import genai
 
 from kgat_pipeline import (
     generate_balanced_evaluation_dataset, run_rq1, verify_event_fully,
-    issue_token, canonical_event_hash, to_prov_o_activity,
+    issue_token, canonical_event_hash, to_prov_o_activity, simulate_event,
 )
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -17,7 +17,7 @@ MODEL_NAME = "gemini-3.6-flash"
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # tighten to your Vercel domain once deployed
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -29,6 +29,7 @@ class EventDocumentation(BaseModel):
     when: str
     why: Optional[str] = None
 
+# Results are computed once at startup and cached -- avoids recomputing on every request
 _cache = {}
 
 def _build_pipeline_results():
@@ -104,3 +105,32 @@ def chat(req: ChatRequest):
 @app.get("/api/health")
 def health():
     return {"status": "ok", "gemini_configured": client is not None}
+
+class SimulateRequest(BaseModel):
+    subject: str
+    predicate: str
+    object: str
+    agent_role: str
+    scope: str = "kg:write"
+    is_fabricated: bool = False
+
+@app.post("/api/simulate")
+def simulate(req: SimulateRequest):
+    """Live verification for the interactive simulator -- real checks, real tampering effects."""
+    kg_diff = _cache.get("kg_diff", {"added": set(), "removed": set()})
+    result = simulate_event(req.subject, req.predicate, req.object, req.agent_role, req.scope, req.is_fabricated, kg_diff)
+
+    if result["verified"] and client:
+        prompt = f"""Produce structured documentation. State ONLY these fields, invent nothing:
+WHO: {result['event']['who']}
+WHAT: {result['event']['what']}
+WHEN: now
+WHY: Not recorded"""
+        response = client.models.generate_content(
+            model=MODEL_NAME, contents=prompt,
+            config={"response_mime_type": "application/json", "response_schema": EventDocumentation.model_json_schema()})
+        result["documentation"] = json.loads(response.text)
+    else:
+        result["documentation"] = None
+
+    return result
