@@ -148,3 +148,30 @@ def run_rq1(events, ground_truth, kg_diff):
     authorization = {"precision": a_precision, "recall": a_recall, "f1": a_f1}
 
     return {"structural": structural, "authorization": authorization}
+
+def simulate_event(subject, predicate, obj, agent_role, scope, is_fabricated, kg_diff):
+    """Live, on-demand verification for the interactive simulator -- runs the REAL checks,
+    not a canned/precomputed result. This is what lets tampering genuinely change the outcome."""
+    agent_id = "sim_agent"
+    e = make_event(agent_id, [agent_role], "added", subject, predicate, None, obj)
+
+    if not is_fabricated:
+        kg_diff = {"added": kg_diff["added"] | {(subject, predicate, obj)}, "removed": kg_diff["removed"]}
+
+    struct_ok, struct_msg = check_structural_grounding(e, kg_diff)
+
+    h = canonical_event_hash(e)
+    token = issue_token(agent_id, scope, h)
+    auth_ok, auth_msg = check_authorization(e, token, required_scope="kg:write")
+
+    conflict_ok, conflict_msg = check_conflicts_for_event(e, [e])
+
+    overall = struct_ok and auth_ok and conflict_ok
+    return {
+        "event": {"who": agent_id, "role": agent_role, "what": f"added ({subject}, {predicate}, {obj})"},
+        "structural": {"pass": struct_ok, "detail": struct_msg or "Found in underlying KG diff."},
+        "authorization": {"pass": auth_ok, "detail": auth_msg or "Signature, expiry, scope, event binding, and role all valid."},
+        "conflict": {"pass": conflict_ok, "detail": conflict_msg or "No competing claim found."},
+        "verified": overall,
+        "hash": h,
+    }
