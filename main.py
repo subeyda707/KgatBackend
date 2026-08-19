@@ -126,10 +126,14 @@ WHO: {result['event']['who']}
 WHAT: {result['event']['what']}
 WHEN: now
 WHY: Not recorded"""
-        response = client.models.generate_content(
-            model=MODEL_NAME, contents=prompt,
-            config={"response_mime_type": "application/json", "response_schema": EventDocumentation.model_json_schema()})
-        result["documentation"] = json.loads(response.text)
+        try:
+            response = client.models.generate_content(
+                model=MODEL_NAME, contents=prompt,
+                config={"response_mime_type": "application/json", "response_schema": EventDocumentation.model_json_schema()})
+            result["documentation"] = json.loads(response.text)
+        except Exception as e:
+            result["documentation"] = None
+            result["documentation_error"] = str(e)
     else:
         result["documentation"] = None
 
@@ -161,8 +165,11 @@ def compare(req: CompareRequest):
         return result
 
     baseline_prompt = f"Explain why this Knowledge Graph change happened: {req.subject} now {req.predicate} {req.object}."
-    baseline_response = client.models.generate_content(model=MODEL_NAME, contents=baseline_prompt)
-    result["baseline"] = {"documented": True, "text": baseline_response.text}
+    try:
+        baseline_response = client.models.generate_content(model=MODEL_NAME, contents=baseline_prompt)
+        result["baseline"] = {"documented": True, "text": baseline_response.text}
+    except Exception as e:
+        result["baseline"] = {"documented": False, "error": str(e)}
 
     if struct_ok:
         constrained_prompt = f"""Produce structured documentation. State ONLY these fields, invent nothing:
@@ -170,10 +177,13 @@ WHO: sim_agent
 WHAT: added ({req.subject}, {req.predicate}, {req.object})
 WHEN: now
 WHY: Not recorded"""
-        constrained_response = client.models.generate_content(
-            model=MODEL_NAME, contents=constrained_prompt,
-            config={"response_mime_type": "application/json", "response_schema": EventDocumentation.model_json_schema()})
-        result["constrained"] = {"documented": True, "json": json.loads(constrained_response.text)}
+        try:
+            constrained_response = client.models.generate_content(
+                model=MODEL_NAME, contents=constrained_prompt,
+                config={"response_mime_type": "application/json", "response_schema": EventDocumentation.model_json_schema()})
+            result["constrained"] = {"documented": True, "json": json.loads(constrained_response.text)}
+        except Exception as e:
+            result["constrained"] = {"documented": False, "error": str(e)}
     else:
         result["constrained"] = {"documented": False, "reason": struct_msg}
 
